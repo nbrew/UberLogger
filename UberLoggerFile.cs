@@ -37,8 +37,8 @@ public class UberLoggerFile : UberLogger.ILogger
                 {
                     LogLineToFile(frame.GetFormattedMethodName());
                 }
+                LogLineToFile("\n");
             }
-            LogLineToFile("\n");
         }
     }
 
