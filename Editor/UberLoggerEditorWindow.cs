@@ -1,17 +1,17 @@
 using UnityEngine;
 using UnityEditor;
-using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System;
 using UberLogger;
+using System.Text.RegularExpressions;
 
 /// <summary>
 /// The console logging frontend.
 /// Pulls data from the UberLoggerEditor backend
 /// </summary>
 
-public class UberLoggerEditorWindow : EditorWindow
+public class UberLoggerEditorWindow : EditorWindow, UberLoggerEditor.ILoggerWindow
 {
     [MenuItem("Window/Show Uber Console")]
     static public void ShowLogWindow()
@@ -25,6 +25,12 @@ public class UberLoggerEditorWindow : EditorWindow
         window.Show();
         window.position = new Rect(200,200,400,300);
         window.CurrentTopPaneHeight = window.position.height/2;
+    }
+
+    public void OnLogChange(LogInfo logInfo)
+    {
+        Dirty = true;
+        Repaint();
     }
 
     void OnEnable()
@@ -42,6 +48,7 @@ public class UberLoggerEditorWindow : EditorWindow
         // UberLogger doesn't allow for duplicate loggers, so this is safe
         // And, due to Unity serialisation stuff, necessary to do to it here.
         UberLogger.Logger.AddLogger(EditorLogger);
+        EditorLogger.AddWindow(this);
         
 #if UNITY_5
         titleContent.text = "Uber Console";
@@ -58,77 +65,97 @@ public class UberLoggerEditorWindow : EditorWindow
         ErrorIcon = SmallErrorIcon;
         WarningIcon = SmallWarningIcon;
         MessageIcon = SmallMessageIcon;
+        Dirty = true;
+        Repaint();
+
     }
 
+
+    Vector2 DrawPos;
     public void OnGUI()
     {
         //Set up the basic style, based on the Unity defaults
         //A bit hacky, but means we don't have to ship an editor guistyle and can fit in to pro and free skins
         Color defaultLineColor = GUI.backgroundColor;
+        GUIStyle unityLogLineEven = null;
+        GUIStyle unityLogLineOdd = null;
+        GUIStyle unitySmallLogLine = null;
         
         foreach(var style in GUI.skin.customStyles)
         {
-            if(style.name=="LODSliderRangeSelected")
-            {
-                SelectedLogLineStyle = new GUIStyle(EditorStyles.label);
-                LogLineStyle = new GUIStyle(EditorStyles.label);
-                SelectedLogLineStyle.margin = new RectOffset(0, 0, 0,0 );
-                SelectedLogLineStyle.normal.background = style.normal.background;
-                SelectedLogLineStyle.active = SelectedLogLineStyle.normal;
-                SelectedLogLineStyle.hover = SelectedLogLineStyle.normal;
-                SelectedLogLineStyle.focused = SelectedLogLineStyle.normal;
-                
-                LogLineStyle.margin = new RectOffset(0, 0, 0,0 );
-                LogLineStyle.normal.background = EditorGUIUtility.whiteTexture;
-                LogLineStyle.active = LogLineStyle.normal;
-                LogLineStyle.hover = LogLineStyle.normal;
-                LogLineStyle.focused = LogLineStyle.normal;
-                break;
-            }
+            if     (style.name=="CN EntryBackEven")  unityLogLineEven = style;
+            else if(style.name=="CN EntryBackOdd")   unityLogLineOdd = style;
+            else if(style.name=="CN StatusInfo")   unitySmallLogLine = style;
         }
 
-        LineColour1 = defaultLineColor;
-        LineColour2 = new Color(defaultLineColor.r*0.9f, defaultLineColor.g*0.9f, defaultLineColor.b*0.9f);
+        EntryStyleBackEven = new GUIStyle(unitySmallLogLine);
+
+        EntryStyleBackEven.normal = unityLogLineEven.normal;
+        EntryStyleBackEven.margin = new RectOffset(0,0,0,0);
+        EntryStyleBackEven.border = new RectOffset(0,0,0,0);
+        EntryStyleBackEven.fixedHeight = 0;
+
+        EntryStyleBackOdd = new GUIStyle(EntryStyleBackEven);
+        EntryStyleBackOdd.normal = unityLogLineOdd.normal;
+        // EntryStyleBackOdd = new GUIStyle(unityLogLine);
+
+
         SizerLineColour = new Color(defaultLineColor.r*0.5f, defaultLineColor.g*0.5f, defaultLineColor.b*0.5f);
 
-        GUILayout.BeginVertical(GUILayout.Height(CurrentTopPaneHeight), GUILayout.MinHeight(100));
+        // GUILayout.BeginVertical(GUILayout.Height(topPanelHeaderHeight), GUILayout.MinHeight(topPanelHeaderHeight));
+        ResizeTopPane();
+        DrawPos = Vector2.zero;
         DrawToolbar();
         DrawFilter();
+        
         DrawChannels();
-        DrawLogList();
-        GUILayout.EndVertical();
-        ResizeTopPane();
 
-        //Create a small gap so the resize handle isn't overwritten
-        GUILayout.Space(10);
-        GUILayout.BeginVertical();
+        float logPanelHeight = CurrentTopPaneHeight-DrawPos.y;
+        
+        DrawLogList(logPanelHeight);
+        DrawPos.y += DividerHeight;
+
         DrawLogDetails();
-        GUILayout.EndVertical();
 
-        //Force a repaint, since we're constantly resizing/adding stuff to the window
-        //Potential optimisation here is to only repaint if the window is resized or we have new logs
-        Repaint();
+        //If we're dirty, do a repaint
+        Dirty = false;
+        if(MakeDirty)
+        {
+            Dirty = true;
+			MakeDirty = false;
+            Repaint();
+        }
     }
 
     //Some helper functions to draw buttons that are only as big as their text
-    bool ButtonClamped(string text, GUIStyle style)
+    bool ButtonClamped(string text, GUIStyle style, out Vector2 size)
     {
-        return GUILayout.Button(text, style, GUILayout.MaxWidth(style.CalcSize(new GUIContent(text)).x));
+        var content = new GUIContent(text);
+        size = style.CalcSize(content);
+        var rect = new Rect(DrawPos, size);
+        return GUI.Button(rect, text, style);
     }
 
-    bool ToggleClamped(bool state, string text, GUIStyle style)
+    bool ToggleClamped(bool state, string text, GUIStyle style, out Vector2 size)
     {
-        return GUILayout.Toggle(state, text, style, GUILayout.MaxWidth(style.CalcSize(new GUIContent(text)).x));
+        var content = new GUIContent(text);
+        return ToggleClamped(state, content, style, out size);
     }
 
-    bool ToggleClamped(bool state, GUIContent content, GUIStyle style, params GUILayoutOption[] par)
+    bool ToggleClamped(bool state, GUIContent content, GUIStyle style, out Vector2 size)
     {
-        return GUILayout.Toggle(state, content, style, GUILayout.MaxWidth(style.CalcSize(content).x));
+        size = style.CalcSize(content);
+        Rect drawRect = new Rect(DrawPos, size);
+        return GUI.Toggle(drawRect, state, content, style);
     }
 
-    void LabelClamped(string text, GUIStyle style)
+    void LabelClamped(string text, GUIStyle style, out Vector2 size)
     {
-        GUILayout.Label(text, style, GUILayout.MaxWidth(style.CalcSize(new GUIContent(text)).x));
+        var content = new GUIContent(text);
+        size = style.CalcSize(content);
+
+        Rect drawRect = new Rect(DrawPos, size);
+        GUI.Label(drawRect, text, style);
     }
 
     /// <summary>
@@ -136,30 +163,68 @@ public class UberLoggerEditorWindow : EditorWindow
     /// </summary>
     void DrawToolbar()
     {
-        EditorGUILayout.BeginHorizontal();
-        if(ButtonClamped("Clear", EditorStyles.toolbarButton))
+        var toolbarStyle = EditorStyles.toolbarButton;
+
+        Vector2 elementSize;
+        if(ButtonClamped("Clear", EditorStyles.toolbarButton, out elementSize))
         {
             EditorLogger.Clear();
         }
-        EditorLogger.ClearOnPlay = ToggleClamped(EditorLogger.ClearOnPlay, "Clear On Play", EditorStyles.toolbarButton);
-        EditorLogger.PauseOnError  = ToggleClamped(EditorLogger.PauseOnError, "Pause On Error", EditorStyles.toolbarButton);
-        ShowTimes = ToggleClamped(ShowTimes, "Show Times", EditorStyles.toolbarButton);
+        DrawPos.x += elementSize.x;
+        EditorLogger.ClearOnPlay = ToggleClamped(EditorLogger.ClearOnPlay, "Clear On Play", EditorStyles.toolbarButton, out elementSize);
+        DrawPos.x += elementSize.x;
+        EditorLogger.PauseOnError  = ToggleClamped(EditorLogger.PauseOnError, "Error Pause", EditorStyles.toolbarButton, out elementSize);
+        DrawPos.x += elementSize.x;
+        var showTimes = ToggleClamped(ShowTimes, "Times", EditorStyles.toolbarButton, out elementSize);
+        if(showTimes!=ShowTimes)
+        {
+            MakeDirty = true;
+            ShowTimes = showTimes;
+        }
+        DrawPos.x += elementSize.x;
+        var collapse = ToggleClamped(Collapse, "Collapse", EditorStyles.toolbarButton, out elementSize);
+        if(collapse!=Collapse)
+        {
+            MakeDirty = true;
+            Collapse = collapse;
+            SelectedRenderLog = -1;
+        }
+        DrawPos.x += elementSize.x;
 
-        var buttonSize = EditorStyles.toolbarButton.CalcSize(new GUIContent("T")).y;
-        GUILayout.FlexibleSpace();
+        ScrollFollowMessages = ToggleClamped(ScrollFollowMessages, "Follow", EditorStyles.toolbarButton, out elementSize);
+        DrawPos.x += elementSize.x;
 
-        var showErrors = ToggleClamped(ShowErrors, new GUIContent(EditorLogger.NoErrors.ToString(), SmallErrorIcon), EditorStyles.toolbarButton, GUILayout.Height(buttonSize));
-        var showWarnings = ToggleClamped(ShowWarnings, new GUIContent(EditorLogger.NoWarnings.ToString(), SmallWarningIcon), EditorStyles.toolbarButton, GUILayout.Height(buttonSize));
-        var showMessages = ToggleClamped(ShowMessages, new GUIContent(EditorLogger.NoMessages.ToString(), SmallMessageIcon), EditorStyles.toolbarButton, GUILayout.Height(buttonSize));
+        var errorToggleContent = new GUIContent(EditorLogger.NoErrors.ToString(), SmallErrorIcon);
+        var warningToggleContent = new GUIContent(EditorLogger.NoWarnings.ToString(), SmallWarningIcon);
+        var messageToggleContent = new GUIContent(EditorLogger.NoMessages.ToString(), SmallMessageIcon);
+
+        float totalErrorButtonWidth = toolbarStyle.CalcSize(errorToggleContent).x + toolbarStyle.CalcSize(warningToggleContent).x + toolbarStyle.CalcSize(messageToggleContent).x;
+
+        float errorIconX = position.width-totalErrorButtonWidth;
+        if(errorIconX > DrawPos.x)
+        {
+            DrawPos.x = errorIconX;
+        }
+
+        var showErrors = ToggleClamped(ShowErrors, errorToggleContent, toolbarStyle, out elementSize);
+        DrawPos.x += elementSize.x;
+        var showWarnings = ToggleClamped(ShowWarnings, warningToggleContent, toolbarStyle, out elementSize);
+        DrawPos.x += elementSize.x;
+        var showMessages = ToggleClamped(ShowMessages, messageToggleContent, toolbarStyle, out elementSize);
+        DrawPos.x += elementSize.x;
+
+        DrawPos.y += elementSize.y;
+        DrawPos.x = 0;
+
         //If the errors/warning to show has changed, clear the selected message
         if(showErrors!=ShowErrors || showWarnings!=ShowWarnings || showMessages!=ShowMessages)
         {
             ClearSelectedMessage();
+            MakeDirty = true;
         }
         ShowWarnings = showWarnings;
         ShowMessages = showMessages;
         ShowErrors = showErrors;
-        EditorGUILayout.EndHorizontal();
     }
 
     /// <summary>
@@ -178,12 +243,17 @@ public class UberLoggerEditorWindow : EditorWindow
             }
         }
 
-        currentChannelIndex = GUILayout.SelectionGrid(currentChannelIndex, channels.ToArray(), channels.Count);
+        var content = new GUIContent("S");
+        var size = GUI.skin.button.CalcSize(content);
+        var drawRect = new Rect(DrawPos, new Vector2(position.width, size.y));
+        currentChannelIndex = GUI.SelectionGrid(drawRect, currentChannelIndex, channels.ToArray(), channels.Count);
         if(CurrentChannel!=channels[currentChannelIndex])
         {
             CurrentChannel = channels[currentChannelIndex];
             ClearSelectedMessage();
+            MakeDirty = true;
         }
+        DrawPos.y+=size.y;
     }
 
     /// <summary>
@@ -208,100 +278,203 @@ public class UberLoggerEditorWindow : EditorWindow
     }
 
     /// <summary>
+    /// Converts a given log element into a piece of gui content to be displayed
+    /// </summary>
+    GUIContent GetLogLineGUIContent(UberLogger.LogInfo log, bool showTimes)
+    {
+        var showMessage = log.Message;
+        //Make all messages single line
+        showMessage = showMessage.Replace(System.Environment.NewLine, " ");
+        if(showTimes)
+        {
+            showMessage = log.GetTimeStampAsString() + ": " + showMessage; 
+        }
+
+        var content = new GUIContent(showMessage, GetIconForLog(log));
+        return content;
+    }
+
+    /// <summary>
     /// Draws the main log panel
     /// </summary>
-    public void DrawLogList()
+    public void DrawLogList(float height)
     {
         var oldColor = GUI.backgroundColor;
 
-        LogListScrollPosition = EditorGUILayout.BeginScrollView(LogListScrollPosition);
-        var maxLogPanelHeight = position.height;
-                
+
         float buttonY = 0;
-        float buttonHeight = LogLineStyle.CalcSize(new GUIContent("Test")).y;
         
         System.Text.RegularExpressions.Regex filterRegex = null;
 
         if(!String.IsNullOrEmpty(FilterRegex))
         {
-            filterRegex = new System.Text.RegularExpressions.Regex(FilterRegex);
+            filterRegex = new Regex(FilterRegex);
         }
 
-        int drawnButtons = 0;
-        var logLineStyle = new GUIStyle(LogLineStyle);
-        for(int c1=0; c1<EditorLogger.LogInfo.Count; c1++)
+        var collapseBadgeStyle = EditorStyles.miniButton;
+        var logLineStyle = EntryStyleBackEven;
+
+        // If we've been marked dirty, we need to recalculate the elements to be displayed
+        if(Dirty)
         {
-            var log = EditorLogger.LogInfo[c1];
-            if(ShouldShowLog(filterRegex, log))
+            LogListMaxWidth = 0;
+            LogListLineHeight = 0;
+            CollapseBadgeMaxWidth = 0;
+            RenderLogs.Clear();
+
+            //When collapsed, count up the unique elements and use those to display
+            if(Collapse)
             {
-                drawnButtons++;
+                var collapsedLines = new Dictionary<string, CountedLog>();
+                var collapsedLinesList = new List<CountedLog>();
 
-                //This is an optimisation - if the button isn't going to display because it's outside of the scroll window, don't show it.
-                //But, so as not to confuse GUILayout, draw something simple instead.
-                if(buttonY+buttonHeight>LogListScrollPosition.y && buttonY<LogListScrollPosition.y+maxLogPanelHeight)
+                foreach(var log in EditorLogger.LogInfo)
                 {
-                    if(c1==SelectedMessage)
+                    if(ShouldShowLog(filterRegex, log))
                     {
-                        logLineStyle = SelectedLogLineStyle;
-                        GUI.backgroundColor = Color.white;
-                    }
-                    else
-                    {
-                        logLineStyle = LogLineStyle;
-                        GUI.backgroundColor = (drawnButtons%2==0) ? LineColour1 : LineColour2;
-                    }
-                
-                    var showMessage = log.Message;
+                        var matchString = log.Message + "!$" + log.Severity + "!$" + log.Channel;
 
-                    //Make all messages single line
-                    showMessage = showMessage.Replace(System.Environment.NewLine, " ");
-                    if(ShowTimes)
-                    {
-                        showMessage = log.GetTimeStampAsString() + ": " + showMessage; 
-                    }
-
-                    var content = new GUIContent(showMessage, GetIconForLog(log));
-                    if(GUILayout.Button(content, logLineStyle, GUILayout.Height(buttonHeight)))
-                    {
-                        //Select a message, or jump to source if it's double-clicked
-                        if(c1==SelectedMessage)
+                        CountedLog countedLog;
+                        if(collapsedLines.TryGetValue(matchString, out countedLog))
                         {
-                            if(EditorApplication.timeSinceStartup-LastMessageClickTime<0.3f)
-                            {
-                                LastMessageClickTime = 0;
-                                if(log.Callstack.Count>0)
-                                {
-                                    JumpToSource(log.Callstack[0]);
-                                }
-                            }
-                            else
-                            {
-                                LastMessageClickTime = EditorApplication.timeSinceStartup;
-                            }
+                            countedLog.Count++;
                         }
                         else
                         {
-                            SelectedMessage = c1;
-                            SelectedCallstackFrame = -1;
+                            countedLog = new CountedLog(log, 1);
+                            collapsedLines.Add(matchString, countedLog);
+                            collapsedLinesList.Add(countedLog);
                         }
+                    }
+                }
 
-                        //Always select the game object that is the source of this message
-                        var go = log.Source as GameObject;
-                        if(go!=null)
+                foreach(var countedLog in collapsedLinesList)
+                {
+                    var content = GetLogLineGUIContent(countedLog.Log, ShowTimes);
+                    RenderLogs.Add(countedLog);
+                    var logLineSize = logLineStyle.CalcSize(content);
+                    LogListMaxWidth = Mathf.Max(LogListMaxWidth, logLineSize.x);
+                    LogListLineHeight = Mathf.Max(LogListLineHeight, logLineSize.y);
+
+                    var collapseBadgeContent = new GUIContent(countedLog.Count.ToString());
+                    var collapseBadgeSize = collapseBadgeStyle.CalcSize(collapseBadgeContent);
+                    CollapseBadgeMaxWidth = Mathf.Max(CollapseBadgeMaxWidth, collapseBadgeSize.x);
+                }
+            }
+            //If we're not collapsed, display everything in order
+            else
+            {
+                foreach(var log in EditorLogger.LogInfo)
+                {
+                    if(ShouldShowLog(filterRegex, log))
+                    {
+                        var content = GetLogLineGUIContent(log, ShowTimes);
+                        RenderLogs.Add(new CountedLog(log, 1));
+                        var logLineSize = logLineStyle.CalcSize(content);
+                        LogListMaxWidth = Mathf.Max(LogListMaxWidth, logLineSize.x);
+                        LogListLineHeight = Mathf.Max(LogListLineHeight, logLineSize.y);
+                    }
+                }
+            }
+
+            LogListMaxWidth += CollapseBadgeMaxWidth;
+        }
+
+        var scrollRect = new Rect(DrawPos, new Vector2(position.width, height));
+        float lineWidth = Mathf.Max(LogListMaxWidth, scrollRect.width);
+
+        var contentRect = new Rect(0, 0, lineWidth, RenderLogs.Count*LogListLineHeight);
+        Vector2 lastScrollPosition = LogListScrollPosition;
+        LogListScrollPosition = GUI.BeginScrollView(scrollRect, LogListScrollPosition, contentRect);
+
+        //If we're following the messages but the user has moved, cancel following
+        if(ScrollFollowMessages)
+        {
+            if(lastScrollPosition.y - LogListScrollPosition.y > LogListLineHeight)
+            {
+                UberDebug.UnityLog(String.Format("{0} {1}", lastScrollPosition.y, LogListScrollPosition.y));
+                ScrollFollowMessages = false;
+            }
+        }
+        
+        float logLineX = CollapseBadgeMaxWidth;
+
+        //Render all the elements
+        int firstRenderLogIndex = (int) (LogListScrollPosition.y/LogListLineHeight);
+        int lastRenderLogIndex = firstRenderLogIndex + (int) (height/LogListLineHeight);
+
+        firstRenderLogIndex = Mathf.Clamp(firstRenderLogIndex, 0, RenderLogs.Count);
+        lastRenderLogIndex = Mathf.Clamp(lastRenderLogIndex, 0, RenderLogs.Count);
+        buttonY = firstRenderLogIndex*LogListLineHeight;
+
+        for(int renderLogIndex=firstRenderLogIndex; renderLogIndex<lastRenderLogIndex; renderLogIndex++)
+        {
+            var countedLog = RenderLogs[renderLogIndex];
+            var log = countedLog.Log;
+            logLineStyle = (renderLogIndex%2==0) ? EntryStyleBackEven : EntryStyleBackOdd;
+            if(renderLogIndex==SelectedRenderLog)
+            {
+                GUI.backgroundColor = new Color(0.5f, 0.5f, 1);
+            }
+            else
+            {
+                GUI.backgroundColor = Color.white;
+            }
+                
+            //Make all messages single line
+            var content = GetLogLineGUIContent(log, ShowTimes);
+            var drawRect = new Rect(logLineX, buttonY, contentRect.width, LogListLineHeight);
+            if(GUI.Button(drawRect, content, logLineStyle))
+            {
+                //Select a message, or jump to source if it's double-clicked
+                if(renderLogIndex==SelectedRenderLog)
+                {
+                    if(EditorApplication.timeSinceStartup-LastMessageClickTime<0.3f)
+                    {
+                        LastMessageClickTime = 0;
+                        if(log.Callstack.Count>0)
                         {
-                            Selection.activeGameObject = go;
+                            JumpToSource(log.Callstack[0]);
                         }
-
+                    }
+                    else
+                    {
+                        LastMessageClickTime = EditorApplication.timeSinceStartup;
                     }
                 }
                 else
                 {
-                    GUILayout.Space(buttonHeight);
+                    SelectedRenderLog = renderLogIndex;
+                    SelectedCallstackFrame = -1;
                 }
-                buttonY += buttonHeight;
+
+                //Always select the game object that is the source of this message
+                var go = log.Source as GameObject;
+                if(go!=null)
+                {
+                    Selection.activeGameObject = go;
+                }
             }
+
+            if(Collapse)
+            {
+                var collapseBadgeContent = new GUIContent(countedLog.Count.ToString());
+                var collapseBadgeSize = collapseBadgeStyle.CalcSize(collapseBadgeContent);
+                var collapseBadgeRect = new Rect(0, buttonY, collapseBadgeSize.x, collapseBadgeSize.y);
+                GUI.Button(collapseBadgeRect, collapseBadgeContent, collapseBadgeStyle);
+            }
+            buttonY += LogListLineHeight;
         }
-        EditorGUILayout.EndScrollView();
+
+        //If we're following the log, move to the end
+        if(ScrollFollowMessages && RenderLogs.Count>0)
+        {
+            LogListScrollPosition.y = ((RenderLogs.Count+1)*LogListLineHeight)-scrollRect.height;
+        }
+
+        GUI.EndScrollView();
+        DrawPos.y += height;
+        DrawPos.x = 0;
         GUI.backgroundColor = oldColor;
     }
 
@@ -312,38 +485,85 @@ public class UberLoggerEditorWindow : EditorWindow
     public void DrawLogDetails()
     {
         var oldColor = GUI.backgroundColor;
-        SelectedMessage = Mathf.Clamp(SelectedMessage, 0, EditorLogger.LogInfo.Count);
-        if(EditorLogger.LogInfo.Count>0 && SelectedMessage>=0)
+        SelectedRenderLog = Mathf.Clamp(SelectedRenderLog, 0, EditorLogger.LogInfo.Count);
+
+        if(RenderLogs.Count>0 && SelectedRenderLog>=0)
         {
-            LogDetailsScrollPosition = EditorGUILayout.BeginScrollView(LogDetailsScrollPosition);
-            var log = EditorLogger.LogInfo[SelectedMessage];
-            var logLineStyle = LogLineStyle;
+            var countedLog = RenderLogs[SelectedRenderLog];
+            var log = countedLog.Log;
+            var logLineStyle = EntryStyleBackEven;
+
+            var sourceStyle = new GUIStyle(GUI.skin.textArea);
+            sourceStyle.richText = true;
+
+            var drawRect = new Rect(DrawPos, new Vector2(position.width-DrawPos.x, position.height-DrawPos.y));
+
+            //Work out the content we need to show, and the sizes
+            var detailLines = new List<GUIContent>();
+            float contentHeight = 0;
+            float contentWidth = 0;
+            float lineHeight = 0;
+
+
             for(int c1=0; c1<log.Callstack.Count; c1++)
             {
                 var frame = log.Callstack[c1];
                 var methodName = frame.GetFormattedMethodName();
                 if(!String.IsNullOrEmpty(methodName))
                 {
+                    var content = new GUIContent(methodName);
+                    detailLines.Add(content);
+
+                    var contentSize = logLineStyle.CalcSize(content);
+                    contentHeight += contentSize.y;
+                    lineHeight = Mathf.Max(lineHeight, contentSize.y);
+                    contentWidth = Mathf.Max(contentSize.x, contentWidth);
+                    if(ShowFrameSource && c1==SelectedCallstackFrame)
+                    {
+                        var sourceContent = GetFrameSourceGUIContent(frame);
+                        if(sourceContent!=null)
+                        {
+                            var sourceSize = sourceStyle.CalcSize(sourceContent);
+                            contentHeight += sourceSize.y;
+                            contentWidth = Mathf.Max(sourceSize.x, contentWidth);
+                        }
+                    }
+                }
+            }
+
+            //Render the content
+            var contentRect = new Rect(0, 0, Mathf.Max(contentWidth, drawRect.width), contentHeight);
+
+            LogDetailsScrollPosition = GUI.BeginScrollView(drawRect, LogDetailsScrollPosition, contentRect);
+
+            float lineY = 0;
+            for(int c1=0; c1<detailLines.Count; c1++)
+            {
+                var lineContent = detailLines[c1];
+                if(lineContent!=null)
+                {
+                    logLineStyle = (c1%2==0) ? EntryStyleBackEven : EntryStyleBackOdd;
                     if(c1==SelectedCallstackFrame)
                     {
-                        GUI.backgroundColor = Color.white;
-                        logLineStyle = SelectedLogLineStyle;
+                        GUI.backgroundColor = new Color(0.5f, 0.5f, 1);
                     }
                     else
                     {
-                        GUI.backgroundColor = (c1%2==0) ? LineColour1 : LineColour2;
-                        logLineStyle = LogLineStyle;
+                        GUI.backgroundColor = Color.white;
                     }
                     
+                    var frame = log.Callstack[c1];
+                    var lineRect = new Rect(0, lineY, contentRect.width, lineHeight);
 
                     // Handle clicks on the stack frame
-                    if(GUILayout.Button(methodName, logLineStyle))
+                    if(GUI.Button(lineRect, lineContent, logLineStyle))
                     {
                         if(c1==SelectedCallstackFrame)
                         {
                             if(Event.current.button==1)
                             {
                                 ToggleShowSource(frame);
+                                Repaint();
                             }
                             else
                             {
@@ -364,15 +584,25 @@ public class UberLoggerEditorWindow : EditorWindow
                             SelectedCallstackFrame = c1;
                         }
                     }
+                    lineY += lineHeight;
+                    //Show the source code if needed
                     if(ShowFrameSource && c1==SelectedCallstackFrame)
                     {
-                        DrawFrameSource(frame);
-                    }
-                    
-                }
+                        GUI.backgroundColor = Color.white;
 
+                        var sourceContent = GetFrameSourceGUIContent(frame);
+                        if(sourceContent!=null)
+                        {
+                            var sourceSize = sourceStyle.CalcSize(sourceContent);
+                            var sourceRect = new Rect(0, lineY, contentRect.width, sourceSize.y);
+
+                            GUI.Label(sourceRect, sourceContent, sourceStyle);
+                            lineY += sourceSize.y;
+                        }
+                    }
+                }
             }
-            EditorGUILayout.EndScrollView();
+            GUI.EndScrollView();
         }
         GUI.backgroundColor = oldColor;
     }
@@ -405,38 +635,52 @@ public class UberLoggerEditorWindow : EditorWindow
         }
     }
 
-    void DrawFrameSource(LogStackFrame frame)
+    GUIContent GetFrameSourceGUIContent(LogStackFrame frame)
     {
-        var style = new GUIStyle(GUI.skin.textArea);
-        style.richText = true;
         var source = GetSourceForFrame(frame);
         if(!String.IsNullOrEmpty(source))
         {
-            EditorGUILayout.BeginVertical();
-            GUILayout.Label(source, style);
-            EditorGUILayout.EndVertical();
+            var content = new GUIContent(source);
+            return content;
         }
+        return null;
     }
+
 
     void DrawFilter()
     {
-        EditorGUILayout.BeginHorizontal();
-        LabelClamped("Filter Regex", GUI.skin.label);
-        var filterRegex = EditorGUILayout.TextArea(FilterRegex);
-        if(ButtonClamped("Clear", GUI.skin.button))
+        Vector2 size;
+        LabelClamped("Filter Regex", GUI.skin.label, out size);
+        DrawPos.x += size.x;
+        
+        string filterRegex = null;
+        bool clearFilter = false;
+        if(ButtonClamped("Clear", GUI.skin.button, out size))
         {
-            filterRegex = null;
+            clearFilter = true;
+            
             GUIUtility.keyboardControl = 0;
             GUIUtility.hotControl = 0;
+        }
+        DrawPos.x += size.x;
+
+        var drawRect = new Rect(DrawPos, new Vector2(position.width-DrawPos.x, size.y));
+        filterRegex = EditorGUI.TextArea(drawRect, FilterRegex);
+
+        if(clearFilter)
+        {
+            filterRegex = null;
         }
         //If the filter has changed, invalidate our currently selected message
         if(filterRegex!=FilterRegex)
         {
             ClearSelectedMessage();
             FilterRegex = filterRegex;
+            MakeDirty = true;
         }
             
-        EditorGUILayout.EndHorizontal();
+        DrawPos.y += size.y;
+        DrawPos.x = 0;
     }
 
     List<string> GetChannels()
@@ -456,11 +700,11 @@ public class UberLoggerEditorWindow : EditorWindow
     private void ResizeTopPane()
     {
         //Set up the resize collision rect
-        CursorChangeRect = new Rect(0, CurrentTopPaneHeight, position.width, 5f);
+        CursorChangeRect = new Rect(0, CurrentTopPaneHeight, position.width, DividerHeight);
 
         var oldColor = GUI.color;
         GUI.color = SizerLineColour; 
-        GUI.DrawTexture(CursorChangeRect,EditorGUIUtility.whiteTexture);
+        GUI.DrawTexture(CursorChangeRect, EditorGUIUtility.whiteTexture);
         GUI.color = oldColor;
         EditorGUIUtility.AddCursorRect(CursorChangeRect,MouseCursor.ResizeVertical);
          
@@ -469,10 +713,12 @@ public class UberLoggerEditorWindow : EditorWindow
             Resize = true;
         }
         
+        //If we've resized, store the new size and force a repaint
         if(Resize)
         {
             CurrentTopPaneHeight = Event.current.mousePosition.y;
             CursorChangeRect.Set(CursorChangeRect.x,CurrentTopPaneHeight,CursorChangeRect.width,CursorChangeRect.height);
+            Repaint();
         }
 
         if(Event.current.type == EventType.MouseUp)
@@ -538,7 +784,7 @@ public class UberLoggerEditorWindow : EditorWindow
 
     void ClearSelectedMessage()
     {
-        SelectedMessage = -1;
+        SelectedRenderLog = -1;
         SelectedCallstackFrame = -1;
         ShowFrameSource = false;
     }
@@ -554,10 +800,15 @@ public class UberLoggerEditorWindow : EditorWindow
     Texture2D SmallMessageIcon;
 
     bool ShowTimes = true;
-    float CurrentTopPaneHeight;
+    bool Collapse = false;
+    bool ScrollFollowMessages = false;
+    float CurrentTopPaneHeight = 200;
     bool Resize = false;
     Rect CursorChangeRect;
-    int SelectedMessage = -1;
+    int SelectedRenderLog = -1;
+    bool Dirty=false;
+    bool MakeDirty=false;
+    float DividerHeight = 5;
 
     double LastMessageClickTime = 0;
     double LastFrameClickTime = 0;
@@ -568,13 +819,10 @@ public class UberLoggerEditorWindow : EditorWindow
     UberLoggerEditor EditorLogger;
 
     //Standard unity pro colours
-    // Color SelectedLineColour = new Color(35.0f/255.0f, 95.0f/255.0f, 153.0f/255.0f);
-    Color LineColour1;
-    Color LineColour2;
     Color SizerLineColour;
 
-    GUIStyle LogLineStyle;
-    GUIStyle SelectedLogLineStyle;
+    GUIStyle EntryStyleBackEven;
+    GUIStyle EntryStyleBackOdd;
     string CurrentChannel=null;
     string FilterRegex = null;
     bool ShowErrors = true; 
@@ -582,4 +830,21 @@ public class UberLoggerEditorWindow : EditorWindow
     bool ShowMessages = true; 
     int SelectedCallstackFrame = 0;
     bool ShowFrameSource = false;
+
+    class CountedLog
+    {
+        public UberLogger.LogInfo Log = null;
+        public Int32 Count=1;
+        public CountedLog(UberLogger.LogInfo log, Int32 count)
+        {
+            Log = log;
+            Count = count;
+        }
+    }
+
+    List<CountedLog> RenderLogs = new List<CountedLog>();
+    float LogListMaxWidth = 0;
+    float LogListLineHeight = 0;
+    float CollapseBadgeMaxWidth = 0;
+
 }
